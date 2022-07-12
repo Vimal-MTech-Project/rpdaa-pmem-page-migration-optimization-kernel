@@ -2542,7 +2542,10 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
 	}
 out_flush:
 	if (list_empty(&pagelist))
+	{
+		up_read(&mm->mmap_sem);
 		return err;
+	}
 
 #ifdef CONFIG_PAGE_MIGRATION_PROFILE
 	timestamp = rdtsc();
@@ -2575,6 +2578,7 @@ out_flush:
 #endif
 
 out:
+	up_read(&mm->mmap_sem);
 	return err;
 }
 

@@ -367,6 +367,7 @@ static void memcg_free_shrinker_maps(struct mem_cgroup *memcg)
 	}
 }
 
+__attribute__((optimize(0)))
 static int memcg_alloc_shrinker_maps(struct mem_cgroup *memcg)
 {
 	struct memcg_shrinker_map *map;
@@ -5029,6 +5030,7 @@ fail:
 	return ERR_PTR(-ENOMEM);
 }
 
+__attribute__((optimize(0)))
 static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
@@ -7191,8 +7193,8 @@ static ssize_t memory_per_node_max_write(struct kernfs_open_file *of,
 	return nbytes;
 }
 
-static struct cftype memcg_per_node_stats_files[N_MEMORY];
-static struct cftype memcg_per_node_max_files[N_MEMORY];
+static struct cftype memcg_per_node_stats_files[MAX_NUMNODES];
+static struct cftype memcg_per_node_max_files[MAX_NUMNODES];
 
 static int __init mem_cgroup_per_node_init(void)
 {
