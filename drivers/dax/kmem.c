@@ -14,6 +14,24 @@
 #include "dax-private.h"
 #include "bus.h"
 
+/**
+ * PMEM Page migration Optimization
+ * Author: Vimal Patel (vimalm@iisc.ac.in)
+ * 
+ * While migrating a page we need to know whether the destination
+ * node is PMEM node or DRAM node along with if it's a local node or
+ * a remote one. For that we maintain two arrays: 
+ * IS_PMEM_NODE and CLOSEST_CPU_NODE_FOR_PMEM both of size MAX_NUMNODES
+ * 
+ * IS_PMEM_NODE[x] stores if NUMA node x is a memory only NUMA node backed by PMEM
+ * CLOSEST_CPU_NODE_FOR_PMEM[x] stores a closest CPU node for PMEM NUMA node x
+ * 
+ * So, if a new PMEM region is hotplugged as node x we need to update CLOSEST_CPU_NODE_FOR_PMEM[x].
+ * So, CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED maintains a bit if such an update is needed.
+ */
+extern char IS_PMEM_NODE[MAX_NUMNODES];
+extern int CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED;
+
 int dev_dax_kmem_probe(struct device *dev)
 {
 	struct dev_dax *dev_dax = to_dev_dax(dev);
@@ -36,6 +54,11 @@ int dev_dax_kmem_probe(struct device *dev)
 		dev_warn(dev, "rejecting DAX region %pR with invalid node: %d\n",
 			 res, numa_node);
 		return -EINVAL;
+	}
+	
+	if(numa_node<MAX_NUMNODES){
+		CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED = 0;
+		IS_PMEM_NODE[numa_node] = 1;
 	}
 
 	/* Hotplug starting at the beginning of the next block: */

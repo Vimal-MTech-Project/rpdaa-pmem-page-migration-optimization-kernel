@@ -11,6 +11,12 @@
 #include <linux/slab.h>
 #include <linux/freezer.h>
 
+#include <linux/migrate.h>
+
+#define _MM_MALLOC_H_INCLUDED 
+#include <immintrin.h>
+#undef _MM_MALLOC_H_INCLUDED 
+
 /*
  * nr_copythreads can be the highest number of threads for given node
  * on any architecture. The actual number of copy threads will be
@@ -25,8 +31,38 @@ struct copy_page_info {
 	unsigned long chunk_size;
 };
 
+// Controls if non-temporal load/stores are used in page data exchange
+int sysctl_enable_nt_exchange = 0;
+
+__attribute__((optimize("-O3")))
+__attribute__((target("avx512vl,bmi2")))
 static void exchange_page_routine(char *to, char *from, unsigned long chunk_size)
 {
+#ifdef CONFIG_AS_AVX512
+	if(sysctl_enable_nt_exchange==1){
+		// use non-temporal load/stores
+		__m512i_u* s = (__m512i_u*)from;
+		__m512i_u* d = (__m512i_u*)to;
+		__m512i_u temp;
+		unsigned long i;
+
+		for(i=0; i<chunk_size; i+=64){
+			temp =  _mm512_stream_load_si512(s);
+			_mm512_stream_si512(s, _mm512_stream_load_si512(d));
+			_mm512_stream_si512(d, temp);
+			s++, d++;
+		} 
+	} else {
+		u64 tmp;
+		int i;
+
+		for (i = 0; i < chunk_size; i += sizeof(tmp)) {
+			tmp = *((u64*)(from + i));
+			*((u64*)(from + i)) = *((u64*)(to + i));
+			*((u64*)(to + i)) = tmp;
+		}
+	}
+#else
 	u64 tmp;
 	int i;
 
@@ -35,32 +71,50 @@ static void exchange_page_routine(char *to, char *from, unsigned long chunk_size
 		*((u64*)(from + i)) = *((u64*)(to + i));
 		*((u64*)(to + i)) = tmp;
 	}
+#endif
 }
 
 static void exchange_page_work_queue_thread(struct work_struct *work)
 {
 	struct copy_page_info *my_work = (struct copy_page_info*)work;
-
+	kernel_fpu_begin();
 	exchange_page_routine(my_work->to,
 							  my_work->from,
 							  my_work->chunk_size);
+	kernel_fpu_end();
 }
+
+// controls the usage of RPDAA optimization in page migration
+extern int sysctl_enable_page_migration_optimization_avoid_remote_pmem_write;
 
 int exchange_page_mthread(struct page *to, struct page *from, int nr_pages)
 {
 	int total_mt_num = limit_mt_num;
-#ifdef CONFIG_PAGE_MIGRATION_PROFILE
-	int to_node = page_to_nid(to);
-#else
-	int to_node = numa_node_id();
-#endif
+	int to_node, from_node;
 	int i;
 	struct copy_page_info *work_items;
 	char *vto, *vfrom;
 	unsigned long chunk_size;
-	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
+	const struct cpumask *per_node_cpumask;
 	int cpu_id_list[32] = {0};
 	int cpu;
+
+	from_node = page_to_nid(from);
+	to_node = page_to_nid(to);
+
+	// by default schedult page migration workers on the initiator node
+	per_node_cpumask = cpumask_of_node(numa_node_id());
+
+	if(sysctl_enable_page_migration_optimization_avoid_remote_pmem_write){
+		if(get_nearest_cpu_node(to_node)!=-1){
+			// schedule page migration on destination node of page migration since it's a PMEM node
+			per_node_cpumask = cpumask_of_node(cpu_to_node(get_nearest_cpu_node(to_node)));
+		} else if(get_nearest_cpu_node(from_node)!=-1) {
+			// schedule page migration on source node of page migration since it's a PMEM node but 
+			// destination node is not a PMEM node
+			per_node_cpumask = cpumask_of_node(cpu_to_node(get_nearest_cpu_node(from_node)));
+		}
+	}
 
 	total_mt_num = min_t(unsigned int, total_mt_num,
 						 cpumask_weight(per_node_cpumask));
@@ -117,18 +171,26 @@ int exchange_page_lists_mthread(struct page **to, struct page **from, int nr_pag
 {
 	int err = 0;
 	int total_mt_num = limit_mt_num;
-#ifdef CONFIG_PAGE_MIGRATION_PROFILE
-	int to_node = page_to_nid(*to);
-#else
-	int to_node = numa_node_id();
-#endif
+	int to_node, from_node;
 	int i;
 	struct copy_page_info *work_items;
-	const struct cpumask *per_node_cpumask = cpumask_of_node(to_node);
+	const struct cpumask *per_node_cpumask;
 	int cpu_id_list[32] = {0};
 	int cpu;
 	int item_idx;
 
+	from_node = page_to_nid(*from);
+	to_node = page_to_nid(*to);
+
+	per_node_cpumask = cpumask_of_node(numa_node_id());
+
+	if(sysctl_enable_page_migration_optimization_avoid_remote_pmem_write){
+		if(get_nearest_cpu_node(to_node)!=-1){
+			per_node_cpumask = cpumask_of_node(cpu_to_node(get_nearest_cpu_node(to_node)));
+		} else if(get_nearest_cpu_node(from_node)!=-1) {
+			per_node_cpumask = cpumask_of_node(cpu_to_node(get_nearest_cpu_node(from_node)));
+		}
+	}
 
 	total_mt_num = min_t(unsigned int, total_mt_num,
 						 cpumask_weight(per_node_cpumask));

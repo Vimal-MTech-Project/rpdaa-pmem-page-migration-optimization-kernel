@@ -89,16 +89,16 @@ static inline void rmap_walk_ksm(struct page *page,
 static inline void ksm_migrate_page(struct page *newpage, struct page *oldpage)
 {
 }
-<<<<<<< HEAD
+
 static inline bool reuse_ksm_page(struct page *page,
 			struct vm_area_struct *vma, unsigned long address)
 {
 	return false;
-=======
+}
 static inline void ksm_exchange_page(struct page *to_page,
 				struct page *from_page)
 {
->>>>>>> exchange page: Add exchange_pages and exchange_pages_concur functions to
+	
 }
 #endif /* CONFIG_MMU */
 #endif /* !CONFIG_KSM */

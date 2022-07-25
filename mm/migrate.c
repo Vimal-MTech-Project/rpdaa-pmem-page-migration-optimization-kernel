@@ -58,7 +58,15 @@
 #include "internal.h"
 
 int accel_page_copy = 1;
-
+// controls if RPDAA is enabled
+int sysctl_enable_page_migration_optimization_avoid_remote_pmem_write = 0;
+// for PMEM memory only NUMA node x, CLOSEST_CPU_NODE_FOR_PMEM[x] stores 
+// id of CPU which is on the same socket x
+// Otherwise it stores -1
+int CLOSEST_CPU_NODE_FOR_PMEM[MAX_NUMNODES];
+// suggest if CLOSEST_CPU_NODE_FOR_PMEM needs to be updated
+int CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED=0;
+EXPORT_SYMBOL(CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED);
 
 struct page_migration_work_item {
 	struct list_head list;
@@ -606,7 +614,7 @@ static void __copy_gigantic_page(struct page *dst, struct page *src,
 	}
 }
 
-static void copy_huge_page(struct page *dst, struct page *src,
+noinline static void copy_huge_page(struct page *dst, struct page *src,
 				enum migrate_mode mode)
 {
 	int i;
@@ -629,7 +637,12 @@ static void copy_huge_page(struct page *dst, struct page *src,
 	}
 
 	/* Try to accelerate page migration if it is not specified in mode  */
-	if (accel_page_copy)
+	// In case of non-concurrent native 2MB page migration RPDAA is used 
+	// only when we use multithreaded page copy.
+	// Note that the actual number of threads does not have to be more than one.
+	// RPDAA works irrespective of actual number of threads but we just need to set 
+	// MIGRATE_MT bit in mode.
+	if (accel_page_copy || sysctl_enable_page_migration_optimization_avoid_remote_pmem_write==1)
 		mode |= MIGRATE_MT;
 
 	if (mode & MIGRATE_MT)
@@ -2282,6 +2295,79 @@ static int store_status(int __user *status, int start, int value, int nr)
 	}
 
 	return 0;
+}
+
+// IS_PMEM_NODE[x] stores is NUMA node x is PMEM memory only NUMA node
+char IS_PMEM_NODE[MAX_NUMNODES];
+EXPORT_SYMBOL(IS_PMEM_NODE);
+
+void init_closest_cpu_node_for_pmem_list_kernel(void);
+/**
+ * @brief Initializes CLOSEST_CPU_NODE_FOR_PMEM array.
+ * CLOSEST_CPU_NODE_FOR_PMEM[x] contains id of a cpu which 
+ * is on the same socket as a NUMA node x if node x is 
+ * PMEM NUMA node. Otherwise it stores -1.
+ */
+void init_closest_cpu_node_for_pmem_list_kernel(){
+	if(CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED)
+		return;
+		
+	int i, j, cpu, nid, cmin;
+	char *is_cpu_node = (char*) kmalloc(MAX_NUMNODES, GFP_KERNEL);
+
+	if(!is_cpu_node){
+		printk("Unable to initialize CLOSEST_CPU_NODE_FOR_PMEM: kernel memory allocation failed!\n");
+		return;
+	}
+
+	int *node_to_cpu = (int*) kmalloc(MAX_NUMNODES*sizeof(int), GFP_KERNEL);
+	if(!node_to_cpu){
+		printk("Unable to initialize CLOSEST_CPU_NODE_FOR_PMEM: kernel memory allocation failed!\n");
+		kfree(is_cpu_node);
+		return;
+	}
+
+	memset(is_cpu_node, 0, MAX_NUMNODES);
+	memset(node_to_cpu, -1, MAX_NUMNODES*sizeof(int));
+	
+	for_each_present_cpu(cpu) {
+		nid = cpu_to_node(cpu);
+		if (nid>=0 && nid<MAX_NUMNODES){
+			is_cpu_node[nid] = 1;
+			node_to_cpu[nid] = cpu;
+		}
+	}
+
+	// find for all pmem nodes the closest cpu node
+	for(i=0; i<MAX_NUMNODES; i++){
+		if(!IS_PMEM_NODE[i]){
+			CLOSEST_CPU_NODE_FOR_PMEM[i] = -1;
+			continue;
+		}
+		/**
+		 * Initialize cmin to 256 which is more than highest
+		 * possible distance between any two numa nodes.
+		 */
+		cmin = 256;
+		for(j=0; j<MAX_NUMNODES; j++){
+			if(is_cpu_node[j] && cmin>node_distance(i, j)){
+				cmin = node_distance(i, j);
+				CLOSEST_CPU_NODE_FOR_PMEM[i] = node_to_cpu[j];
+			}
+		}
+	}
+
+	CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED = 1;
+	kfree(node_to_cpu);
+	kfree(is_cpu_node);
+}
+
+// returns id of closest cpu to the given NUMA node
+int get_nearest_cpu_node(int node){
+	init_closest_cpu_node_for_pmem_list_kernel();
+	if(CLOSEST_CPU_NODE_FOR_PMEM_INITIALIZED==0 || node < 0 || node >= MAX_NUMNODES)
+		return -1;
+	return CLOSEST_CPU_NODE_FOR_PMEM[node];
 }
 
 static int do_move_pages_to_node(struct mm_struct *mm,
