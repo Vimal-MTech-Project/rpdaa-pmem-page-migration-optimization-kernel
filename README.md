@@ -1,6 +1,6 @@
 This kernel implements RPDAA(Remote PMEM Direct Access Avoid) and 
 NT(non-temporal load/stores) optimizations in page migration mechanisms 
-implemented in Nimble patched Linux kernel 5.6.0-rc6+.
+implemented in [Nimble](https://dl.acm.org/doi/10.1145/3297858.3304024) patched Linux kernel 5.6.0-rc6+.
 
 While RPDAA optimizes page migration between two different sockets 
 in Optane system, NT optimization is not limited to that case.
